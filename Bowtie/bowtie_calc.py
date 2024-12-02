@@ -12,15 +12,127 @@ import bowtie_util
 
 """
 
-@Last updated: 2024-09-03
+@Last updated: 2024-12-02
 
-Use this one, not 'bowtie_calc_np.py', for it's outdated.
 """
 
 PROTON_CHANNELS_AMOUNT = 9
 PROTON_CHANNEL_START_INDEX = 8
 ELECTRON_CHANNELS_AMOUNT = 7
 ELECTRON_CHANNEL_START_INDEX = 1
+
+def read_npy_vault(vault_name):
+    """
+    Reads in either the 'array_vault_e_256' or 'array_vault_p_256'
+
+    Parameters:
+    -----------
+    vault_name : {str}
+
+    Returns
+    ----------
+    particles_shot : {np.ndarray}
+    particles_response : {np.ndarray}
+    energy_grid : {dict}
+    radiation_area : {float}
+    """
+
+    # The number of particles shot in a simulation of all energy bins
+    particles_shot = np.load(f"{vault_name}/particles_Shot.npy")
+
+    # The number of particles detected per particle channel in all energy bins
+    particles_response = np.load(f"{vault_name}/particles_Respo.npy")
+
+    other_params = np.load(f"{vault_name}/other_params.npy")
+
+    # The total number of energy bins
+    nstep = int(other_params[0])
+
+    # The radiation area (isotropically radiating sphere) around the Geant4 instrument model in cm2
+    radiation_area = other_params[2]
+
+    # Midpoints of the energy bins in MeV
+    energy_midpoint = np.load(f"{vault_name}/energy_Mid.npy")
+
+    # High cuts of the energy bins in MeV
+    energy_toppoint = np.load(f"{vault_name}/energy_Cut.npy")
+
+    # The energy bin widths in MeV
+    energy_channel_width = np.load(f"{vault_name}/energy_Width.npy")
+
+    # An energy grid in the format compatible with the output of a function in the bowtie package
+    energy_grid = { "nstep": nstep, 
+                    "midpt": energy_midpoint,
+                    "ehigh": energy_toppoint, 
+                    "enlow": energy_toppoint - energy_channel_width,
+                    "binwd": energy_channel_width }
+
+    return particles_shot, particles_response, energy_grid, radiation_area
+
+
+def calculate_response_matrix(particles_shot, particles_response, energy_grid:dict,
+                             radiation_area:float, side:int,
+                             channel_start:int, channel_stop:int,
+                             contamination:bool=False, sum_channels:bool=False):
+    """
+    
+    Parameters:
+    -----------
+    particles_shot : {np.ndarray}
+    particles_response : {np.ndarray}
+    energy_grid : {dict}
+    radiation_area : {float}
+    channel_start : {int}
+    channel_stop : {int}
+    side : {int}
+
+    contamination : {bool} optional, default False
+    sum_channels : {bool} optional, default False
+    
+    Returns: 
+    --------
+    response_matrix : {list[dict]} 
+    """
+
+    if sum_channels:
+        step = 2
+        channel_names = ["O", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "P1+P2", "P2", "P3+P4", "P4", "P5+P6", "P6", "P7+P8", "P8", "P9"]
+    else:
+        step = 1
+        if contamination:
+            channel_names = ["O", "EP1", "EP2", "EP3", "EP4", "EP5", "EP6", "EP7", "PE1", "PE2", "PE3", "PE4"]
+
+        # The normal case: no summing channels and no contamination.
+        else:
+            channel_names = ["O", "E1", "E2", "E3", "E4", "E5", "E6", "E7", \
+                             "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"]
+
+    response_matrix = []
+    normalize_to_area = 1.0 / ((particles_shot + 1) / radiation_area) * np.pi
+
+    for i in range(channel_start, channel_stop, step):
+
+        if not sum_channels:
+            resp_cache = particles_response[:, i, side] * normalize_to_area
+
+        else:
+            if i < channel_stop-1:
+                resp_cache1 = particles_response[:, i, side] * normalize_to_area
+                resp_cache2 = particles_response[:, i+1, side] * normalize_to_area
+
+                # Sum element-wise over the slices of the two channels
+                resp_cache = np.add(resp_cache1, resp_cache2)
+            else:
+                resp_cache = particles_response[:, i, side] * normalize_to_area
+
+        response_matrix.append({
+            "name": channel_names[i],
+            "grid": energy_grid,
+            "resp": resp_cache,  # The channel response
+        })
+
+    return response_matrix
+
 
 def main(use_integral_bowtie = False, particle: str = 'e', side:int = 0,
          sum_channels: bool = False, contamination: bool = False,
@@ -146,7 +258,7 @@ def main(use_integral_bowtie = False, particle: str = 'e', side:int = 0,
         })
 
     # power_law_spectra = bowtie.generate_pwlaw_spectra(energy_grid, gamma_min, gamma_max, gamma_steps)
-    power_law_spectra = bowtie.generate_exppowlaw_spectra(energy_grid, gamma_min, gamma_max, gamma_steps, cutoff_energy = 0.002)
+    power_law_spectra = bowtie_util.generate_exppowlaw_spectra(energy_grid, gamma_min, gamma_max, gamma_steps, cutoff_energy = 0.002)
     gf_to_print = np.zeros(len(response_matrix))
     eff_energies_to_print = np.zeros(len(response_matrix))
     # gf_std = np.zeros(len(response_matrix))
@@ -156,7 +268,7 @@ def main(use_integral_bowtie = False, particle: str = 'e', side:int = 0,
     gf_and_eff_en = {}
 
     for channel, response in enumerate(response_matrix):
-        (gf_to_print[channel], gf_std, eff_energies_to_print[channel], boundary_low, boundary_high) = bowtie.calculate_bowtie_gf(response,
+        (gf_to_print[channel], gf_std, eff_energies_to_print[channel], boundary_low, boundary_high) = bowtie_util.calculate_bowtie_gf(response,
                                                                                                   power_law_spectra,
                                                                                                   emin = global_emin,
                                                                                                   emax = global_emax,
