@@ -1,294 +1,412 @@
 #!/usr/bin/env python3
-"""
-A module for the bow-tie (https://www.utupub.fi/handle/10024/152846 and references therein)
-analysis of a response function of a particle instrument.
-"""
-__author__ = "Philipp Oleynik"
-__credits__ = ["Philipp Oleynik"]
 
-import math
-from matplotlib import rcParams
-from scipy import interpolate
-from scipy import optimize
-import matplotlib.cm as cm
-import matplotlib.colors as clr
-import matplotlib.pyplot as plt
+import os
 import numpy as np
-from statistics import geometric_mean
+import sys
 
-from . import plotutil as plu
+from matplotlib import pyplot as plt
 
+import bowtie
 
-def plot_multi_geometric(geometric_factors, response_data,
-                         emin=1.0, emax=100.0, gmin=1.0E-15, gmax=1.0E10,
-                         save=False, saveidx="0", integral=False, save_path=''):
+#from sixs_plot_util import *
+
+"""
+
+@Last updated: 2024-12-02
+
+"""
+
+PROTON_CHANNELS_AMOUNT = 9
+PROTON_CHANNEL_START_INDEX = 8
+ELECTRON_CHANNELS_AMOUNT = 7
+ELECTRON_CHANNEL_START_INDEX = 1
+
+def read_npy_vault(vault_name):
     """
-    Plot differential geometric factor and optionally save the plot.
-    :param response_data: channel response data
-    :type response_data: a dictionary. 'grid' defines the energy grid, 'resp' defines the response function.
-    :param integral: if True, geometric factors are assumed to be computed for an integral channel.
-    :param geometric_factors: N_gamma by N_energy matrix. N_gamma denotes amount of different power law indices.
-                              N_energy denotes the number of energy bins
-    :param energy_grid_plot: N_energy array with midpoint energies of each energy bin
-    :param emin: Minimum on energy axis
-    :param emax: Maximum on energy axis
-    :param gmin: Minimum on geometric factor axis
-    :param gmax: Maximum on geometric factor axis
-    :param saveidx: String suffix for the plot filename
-    :param save: if True, save a Gdiff_saveidx.png file, show the plot otherwise
-    :param save_path: Base path for saving the plot
-    :type save_path: basestring
+    Reads in either the 'array_vault_e_256' or 'array_vault_p_256'
+
+    Parameters:
+    -----------
+    vault_name : {str}
+
+    Returns
+    ----------
+    particles_shot : {np.ndarray}
+    particles_response : {np.ndarray}
+    energy_grid : {dict}
+    radiation_area : {float}
     """
-    energy_grid_plot = response_data['grid']
-    plu.setup_latex(rcParams)
-    plu.setup_plotstyle(rcParams)
-    rcParams["figure.figsize"] = [6.4, 4.8]
-    grid_kws = {"height_ratios": (0.7, 0.3), "hspace": .1}
-    fig, (ax, subax) = plt.subplots(2, sharex='col', sharey='none', gridspec_kw=grid_kws)
-    plu.set_log_axes_simple(ax)
-    if integral:
-        ax.set_ylabel(r'G(E) [${\rm cm}^2\,{\rm sr}$]', fontsize=14, color='black')
-        subax.set_xlabel(r'Threshold energy, MeV', fontsize=14, color='black')
+
+    # The number of particles shot in a simulation of all energy bins
+    particles_shot = np.load(f"{vault_name}/particles_Shot.npy")
+
+    # The number of particles detected per particle channel in all energy bins
+    particles_response = np.load(f"{vault_name}/particles_Respo.npy")
+
+    other_params = np.load(f"{vault_name}/other_params.npy")
+
+    # The total number of energy bins
+    nstep = int(other_params[0])
+
+    # The radiation area (isotropically radiating sphere) around the Geant4 instrument model in cm2
+    radiation_area = other_params[2]
+
+    # Midpoints of the energy bins in MeV
+    energy_midpoint = np.load(f"{vault_name}/energy_Mid.npy")
+
+    # High cuts of the energy bins in MeV
+    energy_toppoint = np.load(f"{vault_name}/energy_Cut.npy")
+
+    # The energy bin widths in MeV
+    energy_channel_width = np.load(f"{vault_name}/energy_Width.npy")
+
+    # An energy grid in the format compatible with the output of a function in the bowtie package
+    energy_grid = { "nstep": nstep, 
+                    "midpt": energy_midpoint,
+                    "ehigh": energy_toppoint, 
+                    "enlow": energy_toppoint - energy_channel_width,
+                    "binwd": energy_channel_width }
+
+    return particles_shot, particles_response, energy_grid, radiation_area
+
+
+def calculate_response_matrix(particles_shot, particles_response, energy_grid:dict,
+                             radiation_area:float, side:int,
+                             channel_start:int, channel_stop:int,
+                             contamination:bool=False, sum_channels:bool=False):
+    """
+    
+    Parameters:
+    -----------
+    particles_shot : {np.ndarray}
+    particles_response : {np.ndarray}
+    energy_grid : {dict}
+    radiation_area : {float}
+    channel_start : {int}
+    channel_stop : {int}
+    side : {int}
+
+    contamination : {bool} optional, default False
+    sum_channels : {bool} optional, default False
+    
+    Returns: 
+    --------
+    response_matrix : {list[dict]} 
+    """
+
+    if sum_channels:
+        step = 2
+        channel_names = ["O", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "P1+P2", "P2", "P3+P4", "P4", "P5+P6", "P6", "P7+P8", "P8", "P9"]
     else:
-        ax.set_ylabel(r'G$\delta$E [${\rm cm}^2\,{\rm sr}\,{\rm MeV}$]', fontsize=14, color='black')
-        subax.set_xlabel(r'Effective energy, MeV', fontsize=14, color='black')
-    gamma_steps_ = geometric_factors.shape[0]
-    energy_steps_ = geometric_factors.shape[1]
+        step = 1
+        if contamination:
+            channel_names = ["O", "EP1", "EP2", "EP3", "EP4", "EP5", "EP6", "EP7", "PE1", "PE2", "PE3", "PE4"]
 
-    # apply color palette to the plot
-    gamma_norm_ = clr.Normalize(vmin=0, vmax=gamma_steps_ - 1)
-
-    # cm.cmap() doesn't exist in matplotlib 3.9.0 -> workaround to call plt.get_cmap() instead
-    # gamma_colormap_ = cm.ScalarMappable(norm=gamma_norm_, cmap=cm.get_cmap('viridis'))
-    gamma_colormap_ = cm.ScalarMappable(norm=gamma_norm_, cmap=plt.get_cmap("viridis"))
-    ax.set_prop_cycle('c', [gamma_colormap_.to_rgba(ii) for ii in range(gamma_steps_)])
-
-    # gamma_steps_ - number of different power law indices in the calculated geometric factors
-    # x data is a repetition of the same energies that ^^^ number of times.
-    # energy_steps_ - number of energy values for which the geometric factors are calculated
-    # y data is just geometric factors themselves for different power law indices, transposed due to the initial choice of the array definition
-    ax.plot([np.full(gamma_steps_, energy_grid_plot['midpt'][jj]) for jj in range(energy_steps_)],
-            geometric_factors.T)
-
-    ax.plot(response_data['grid']['midpt'], response_data['resp'], c='b')
-    non_zero_geof = np.mean(geometric_factors, axis=0) > 0
-    means_ = np.mean(np.log(geometric_factors[:, non_zero_geof]), axis=0) + 1E-124
-    stddev_ = np.std((geometric_factors[:, non_zero_geof]), axis=0) / np.exp(means_)
-    stddev_ /= np.min(stddev_)
-
-    subax.plot(energy_grid_plot['midpt'][non_zero_geof], stddev_, c="r")
-    subax.set_ylim(0, 5)
-    subax.grid(True, which='both', alpha=0.3, zorder=0)
-    subax.set_ylabel(r'$\sigma$', fontsize=14, color='black')
-    subax.set_xlim(emin, emax)
-    ax.set_xlim(emin, emax)
-    ax.set_ylim(gmin, gmax)
-    if integral:
-        fname_ = save_path + 'Gint_np_{0:s}.png'.format(saveidx)
-    else:
-        fname_ = save_path + 'Gdiff_np_{0:s}.png'.format(saveidx)
-
-    if save:
-        plt.savefig(fname_, format='png', dpi=150)
-        print(fname_)
-    else:
-        plt.show(block=True)
-
-
-def generate_pwlaw_spectra(energy_grid_dict,
-                           gamma_pow_min=-3.5, gamma_pow_max=-1.5,
-                           num_steps=100, use_integral_bowtie=False):
-    model_spectra = []  # generate power-law spectra for folding
-    if use_integral_bowtie:
-        for power_law_gamma in np.linspace(gamma_pow_min, gamma_pow_max, num=num_steps, endpoint=True):
-            model_spectra.append({
-                'gamma': power_law_gamma,
-                'spect': generate_powerlaw_np(energy_grid=energy_grid_dict, power_index=power_law_gamma),
-                'intsp': generate_integral_powerlaw_np(energy_grid=energy_grid_dict,
-                                                       power_index=power_law_gamma)
-            })
-    else:
-        for power_law_gamma in np.linspace(gamma_pow_min, gamma_pow_max, num=num_steps, endpoint=True):
-            model_spectra.append({
-                'gamma': power_law_gamma,
-                'spect': generate_powerlaw_np(energy_grid=energy_grid_dict, power_index=power_law_gamma)
-            })
-    return model_spectra
-
-
-def generate_exppowlaw_spectra(energy_grid_dict,
-                               gamma_pow_min=-3.5, gamma_pow_max=-1.5,
-                               num_steps=100, use_integral_bowtie=False,
-                               cutoff_energy=1.0):
-    model_spectra = []  # generate exponential cutoff power-law spectra for folding
-    if use_integral_bowtie:
-        print("Not implemented!")
-        return None
-    else:
-        for power_law_gamma in np.linspace(gamma_pow_min, gamma_pow_max, num=num_steps, endpoint=True):
-            spectrum = 1.0 * np.power(energy_grid_dict['midpt'], power_law_gamma) * \
-                       np.exp(-cutoff_energy / (energy_grid_dict['midpt'] - cutoff_energy))
-
-            index_cutoff = np.searchsorted(energy_grid_dict['midpt'], cutoff_energy)
-            np.put(spectrum, range(0, index_cutoff + 1), 1.0E-30)
-            model_spectra.append({
-                'gamma': power_law_gamma,
-                'spect': spectrum
-            })
-    return model_spectra
-
-
-def generate_integral_powerlaw_np(*, energy_grid=None,
-                                  power_index=-3.5, sp_norm=1.0):
-    """
-
-    :param energy_grid:
-    :param power_index:
-    :param sp_norm:
-    :return:
-    """
-    if energy_grid is not None:
-        spectrum = - sp_norm * np.power(energy_grid['enlow'], power_index + 1) / (power_index + 1)
-        return spectrum
-    else:
-        return None
-
-
-def generate_powerlaw_np(*, energy_grid=None, power_index=-2, sp_norm=1.0):
-    """
-
-    :param energy_grid:
-    :param power_index:
-    :param sp_norm:
-    :return:
-    """
-    spectrum = sp_norm * np.power(energy_grid['midpt'], power_index)
-    return spectrum
-
-
-def fold_spectrum_np(*, grid=None, spectrum=None, response=None):
-    """
-    Folds incident spectrum with an instrument response. Int( spectrum * response * dE)
-    :param grid: energy grid, midpoints of each energy bin
-    :param spectrum: intensities defined at the midpoint of each energy bin
-    :param response: geometric factor curve defined at the midpoint of each energy bin
-    :return: countrate in the channel described by the response.
-    """
-    if grid is None:
-        return math.nan
-    if spectrum is None or response is None:
-        return 0
-    if (len(spectrum) == len(response)) and (len(spectrum) == len(grid['midpt'])):
-        result = np.trapz(np.multiply(spectrum, response), grid['midpt'])
-        return result
-    else:
-        return 0
-
-
-def calculate_bowtie_gf(response_data,
-                        model_spectra,
-                        emin=0.01, emax=1000,
-                        gamma_index_steps=100,
-                        use_integral_bowtie=False,
-                        sigma=3,
-                        plot=False,
-                        gfactor_confidence_level=0.9,
-                        return_gf_stddev=False):
-    """
-    Calculates the bowtie geometric factor for a single channel
-    :param return_gf_box: True if the margin of the channel geometric factor is requested.
-    :type return_gf_box: bool
-    :param response_data: The response data for the channel.
-    :type response_data: A dictionary, must have 'grid', the energy_grid_data (dictionary, see make_energy_grid),
-                         and 'resp', the channel response (an array of a length of energy_grid_data['nstep'])
-    :param model_spectra: The model spectra for the analysis.
-    :type model_spectra: A dictionary (see generate_pwlaw_spectra)
-    :param emin: the minimal energy to consider
-    :type emin: float
-    :param emax: the maximum energy to consider
-    :type emax: float
-    :param gamma_index_steps:
-    :type gamma_index_steps:
-    :param use_integral_bowtie:
-    :type use_integral_bowtie:
-    :param sigma: Cutoff sigma value for the energy margin.
-    :type sigma: float
-    :return: (The geometric factor, the effective energy, lower margin for the effective energy, upper margin for the effective energy)
-    :rtype: list
-    """
-    energy_grid_local = response_data['grid']['midpt']
-
-    index_emin = np.searchsorted(energy_grid_local, emin)  # search for an index corresponding to start energy
-    index_emax = np.searchsorted(energy_grid_local, emax)
-    multi_geometric_factors = np.zeros((gamma_index_steps, response_data['grid']['nstep']), dtype=float)
-    # for each model spectrum do the folding.
-
-    for model_spectrum_idx, model_spectrum in enumerate(model_spectra):
-
-        spectral_folding_int = fold_spectrum_np(grid=response_data['grid'],
-                                                spectrum=model_spectrum['spect'],
-                                                response=response_data['resp'])
-        # TODO response error margin!
-        if use_integral_bowtie:
-            spectrum_data = model_spectrum['intsp']
+        # The normal case: no summing channels and no contamination.
         else:
-            spectrum_data = model_spectrum['spect']
+            channel_names = ["O", "E1", "E2", "E3", "E4", "E5", "E6", "E7", \
+                             "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"]
 
-        multi_geometric_factors[model_spectrum_idx, index_emin:index_emax] = spectral_folding_int / spectrum_data[index_emin:index_emax]
+    response_matrix = []
+    normalize_to_area = 1.0 / ((particles_shot + 1) / radiation_area) * np.pi
 
-    # Create a discrete standard deviation vector for each energy in the grid.
-    # This standard deviation is normalized to the local mean, so that a measure of spreading of points is obtained.
-    # Mathematically, this implies normalization of the random variable to its mean.
-    non_zero_gf = np.mean(multi_geometric_factors, axis=0) > 0
-    multi_geometric_factors_usable = multi_geometric_factors[:, non_zero_gf]
-    # print(len(multi_geometric_factors), len(multi_geometric_factors_usable))
-    means = np.exp(np.mean(np.log(multi_geometric_factors_usable), axis=0))  # logarithmic mean of geometric factor curves by energy bin
+    for i in range(channel_start, channel_stop, step):
 
-    # Cross-channel contamination: PE4 causes ValueError: zero-size array to reduction operation minimum which has no identity for 
-    # gf_stddev_norm = gf_stddev / np.min(gf_stddev)
-    # For now, 2024-08-23 I'll replace the normed stddev with a negative tenth (It should never be a negative number). 
-    try : 
-        gf_stddev_abs = np.std(multi_geometric_factors_usable, axis=0)
-        gf_stddev = gf_stddev_abs / means
-        gf_stddev_norm = gf_stddev / np.min(gf_stddev)
-    except ValueError:
-        gf_stddev_norm = -1e-1
+        if not sum_channels:
+            resp_cache = particles_response[:, i, side] * normalize_to_area
 
-    bowtie_cross_index = np.argmin(gf_stddev_norm)  # The minimal standard deviation point - bowtie crossing point.
+        else:
+            if i < channel_stop-1:
+                resp_cache1 = particles_response[:, i, side] * normalize_to_area
+                resp_cache2 = particles_response[:, i+1, side] * normalize_to_area
 
-    # Interpolate the discrete standard deviation so that it could be used in a equation solver.
-    # The discrete standard deviation is normalized to 1 in the minimum, so that 1.0 must be subtracted
-    # before sigma level to make a discrete "equation" for the the interpolator because
-    # the optimize.bisect looks for zeroes of a function, which is the interpolator.
-    stddev_interpolator = interpolate.interp1d(energy_grid_local[non_zero_gf], gf_stddev_norm - 1.0 - sigma)
-    try:
-        (channel_energy_low) = optimize.bisect(stddev_interpolator,
-                                               energy_grid_local[non_zero_gf][0],
-                                               energy_grid_local[non_zero_gf][bowtie_cross_index])  # to the left of bowtie_cross_index
-    except ValueError:
-        channel_energy_low = 0
+                # Sum element-wise over the slices of the two channels
+                resp_cache = np.add(resp_cache1, resp_cache2)
+            else:
+                resp_cache = particles_response[:, i, side] * normalize_to_area
 
-    try:
-        (channel_energy_high) = optimize.bisect(stddev_interpolator,
-                                                energy_grid_local[non_zero_gf][bowtie_cross_index],
-                                                energy_grid_local[non_zero_gf][-1])  # to the right of bowtie_cross_index
-    except ValueError:
-        channel_energy_high = 0
+        response_matrix.append({
+            "name": channel_names[i],
+            "grid": energy_grid,
+            "resp": resp_cache,  # The channel response
+        })
 
-    # gf = np.mean(multi_geometric_factors_usable, axis = 0)  # Average geometric factor for all model spectra
-    # gf_cross = gf[bowtie_cross_index]  # The mean geometric factor for the bowtie crossing point
+    return response_matrix
 
-    gf_cross = geometric_mean(multi_geometric_factors_usable[:, bowtie_cross_index])
-    energy_cross = energy_grid_local[bowtie_cross_index]
 
+def main(use_integral_bowtie = False, particle: str = 'e', side:int = 0,
+         sum_channels: bool = False, contamination: bool = False,
+         plot: bool = True,
+         savefig: bool = False,
+         save_response_matrix : bool = False,
+         save_energy_and_geometry : bool = False,
+         save_type : str = "csv",
+         savepath : str = "geometric_factors_stats"
+         ):
+    """
+    use_integral_bowtie : bool
+    particle : str, either 'e' or 'p'
+    side : int, [0,4]
+    sum_channels : bool, does bowtie analysis for P1+P2, P3+P4, P5+P6, P7+P8 instead of every channel individually
+    contamination : bool, tests electron/proton contamination in proton/electron channels
+    plot : bool, plots the result
+    savefig : bool, saves the figure
+    save_response_matrix : bool, creates a file in the current directory, that contains the response matrix.
+    save_type : bool, The type of file to save the effective energies and geometric facotrs to. Default 'csv'.
+                        Can also be 'npy'
+    """
+
+    base_path = CURRENT_DIRECTORY # "/home/chospa/bepicolombo/bowtie-master"  # adjust to your path
+    subdir = f"side{side}_response_stats"
+    channels_per_decade = 256 # vault
+    gamma_min = -10.0 # usually -3.5
+    gamma_max = -7.0 # usually -1.5
+    gamma_steps = 100
+    global_emin = 0.01
+    global_emax = 50.0
+
+    # Choose which particle
+    if particle == 'e':
+
+        particle_str = "electron"
+        other_particle_str = "proton"
+
+        # Look into the response of proton channels to electron energy
+        if contamination:
+            instrument_channels = PROTON_CHANNELS_AMOUNT - 6 # P4, P5, P6, P7, P8 and P9 are not included here, the response is 0
+            channel_start = PROTON_CHANNEL_START_INDEX
+
+        # Normal situation: electron channel response to electron energy
+        else:
+            instrument_channels = ELECTRON_CHANNELS_AMOUNT
+            channel_start = ELECTRON_CHANNEL_START_INDEX
+
+    elif particle=='p':
+
+        particle_str = "proton"
+        other_particle_str = "electron"
+
+        # Electron channel response to proton energy
+        if contamination:
+            instrument_channels = ELECTRON_CHANNELS_AMOUNT
+            channel_start = ELECTRON_CHANNEL_START_INDEX
+
+        # Normal situation: proton channel responses to proton energy
+        else:
+            instrument_channels = PROTON_CHANNELS_AMOUNT
+            channel_start = PROTON_CHANNEL_START_INDEX
+        
+
+    else:
+        raise ValueError("Particle needs to be 'e' or 'p'.")
+
+    channel_stop = channel_start + instrument_channels
+
+    # y = particles_response[:, chdraw, 2] / (particles_shot / radiation_area + 1E-24) * const.pi
+    data_file_name = f"{base_path}/array_vault_{particle}_{channels_per_decade}" #.format(channels_per_decade, particle)
+    print("Using response file:", data_file_name)
+
+
+    particles_shot = np.load(f'{data_file_name}/particles_Shot.npy')  # The number of particles shot in a simulation of all energy bins
+    particles_response = np.load(f'{data_file_name}/particles_Respo.npy')  # The number of particles detected per particle channel in all energy bins
+    other_params = np.load(f'{data_file_name}/other_params.npy')
+    nstep = int(other_params[0])  # The total number of energy bins
+    radiation_area = other_params[2]  # The radiation area (isotropically radiating sphere) around the Geant4 instrument model in cm2
+    energy_midpoint = np.load(f'{data_file_name}/energy_Mid.npy')  # midpoints of the energy bins in MeV
+    energy_toppoint = np.load(f'{data_file_name}/energy_Cut.npy')  # high cuts of the energy bins in MeV
+    energy_channel_width = np.load(f'{data_file_name}/energy_Width.npy')  # the energy bin widths in MeV
+
+    # energy grid in the format compatible with the output of a function in the bowtie package
+    energy_grid = { 'nstep': nstep, 'midpt': energy_midpoint,
+                    'ehigh': energy_toppoint, 'enlow': energy_toppoint - energy_channel_width,
+                    'binwd': energy_channel_width }
+
+    if sum_channels:
+        channel_names = ["O", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "P1+P2", "P2", "P3+P4", "P4", "P5+P6", "P6", "P7+P8", "P8", "P9"]
+        step = 2
+    else:
+        if contamination:
+            # channel_names = ["O", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "PE1", "PE2", "PE3", "PE4", "PE5", "PE6", "P7", "P8", "P9"]
+            channel_names = ["O", "EP1", "EP2", "EP3", "EP4", "EP5", "EP6", "EP7", "PE1", "PE2", "PE3", "PE4"]
+
+        # normal case: no summing channels and no contamination.
+        else:
+            channel_names = ["O", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"]
+        step = 1
+
+    response_matrix = []
+    normalize_to_area = 1.0 / ((particles_shot + 1) / radiation_area) * np.pi
+
+    for i in range(channel_start, channel_stop, step):
+
+        if not sum_channels:
+            resp_cache = particles_response[:, i, side] * normalize_to_area
+
+        else:
+            if i < channel_stop-1:
+                resp_cache1 = particles_response[:, i, side] * normalize_to_area
+                resp_cache2 = particles_response[:, i+1, side] * normalize_to_area
+                resp_cache = np.add(resp_cache1, resp_cache2) #sum element-wise over the slices of the two channels
+
+            else:
+                resp_cache = particles_response[:, i, side] * normalize_to_area
+
+        response_matrix.append({
+            "name": channel_names[i],  # last added name
+            "grid": energy_grid,
+            "resp": resp_cache,  # channel response
+        })
+
+    # power_law_spectra = bowtie.generate_pwlaw_spectra(energy_grid, gamma_min, gamma_max, gamma_steps)
+    power_law_spectra = bowtie.generate_exppowlaw_spectra(energy_grid, gamma_min, gamma_max, gamma_steps, cutoff_energy = 0.002)
+    gf_to_print = np.zeros(len(response_matrix))
+    eff_energies_to_print = np.zeros(len(response_matrix))
+    # gf_std = np.zeros(len(response_matrix))
+
+    # This dictionary holds the geometric factor, its (relative) errors and the effective energy of a channel
+    # gf_and_eff_en = np.zeros((len(response_matrix), 4))
+    gf_and_eff_en = {}
+
+    for channel, response in enumerate(response_matrix):
+        (gf_to_print[channel], gf_std, eff_energies_to_print[channel], boundary_low, boundary_high) = bowtie.calculate_bowtie_gf(response,
+                                                                                                  power_law_spectra,
+                                                                                                  emin = global_emin,
+                                                                                                  emax = global_emax,
+                                                                                                  gamma_index_steps = gamma_steps,
+                                                                                                  use_integral_bowtie = use_integral_bowtie,
+                                                                                                  sigma = 3,
+                                                                                                  return_gf_stddev=True,
+                                                                                                  plot=False)
+        print(f"Channel {response['name']}: G = {gf_to_print[channel]:.3g}, cm2srMeV; E = {eff_energies_to_print[channel]:.2g}, MeV")
+        # print(f"Error limits (energy): [{boundary_low}, {boundary_high}]")
+        gf_std["gfup"] -= gf_to_print[channel]
+        gf_std["gflo"] -= gf_to_print[channel]
+        gf_std["gflo"] = -gf_std["gflo"]
+        print(f"GF_std: [{gf_std}]")
+        gf_and_eff_en[response["name"]] = (eff_energies_to_print[channel], gf_to_print[channel], gf_std["gfup"], gf_std["gflo"])
+
+    titles = (  f"Channel response as a function of {particle_str} energy",
+                "Combined channel response as a function of particle energy",
+                f"{other_particle_str.capitalize()} channel response as a function of {particle_str} energy"
+             )
+
+    # If we want to save the response matrix to a file, use these lists to contain
+    channel_name_list = []
+    incident_energies = []
+    responses = []
     if plot:
-        plot_multi_geometric(geometric_factors=multi_geometric_factors, response_data=response_data,
-                             emin=emin, emax=emax, gmin=1E-5, gmax=10)
 
-    if return_gf_stddev:
-        gf_upper = np.quantile(multi_geometric_factors_usable[:, bowtie_cross_index], gfactor_confidence_level)
-        gf_lower = np.quantile(multi_geometric_factors_usable[:, bowtie_cross_index], 1 - gfactor_confidence_level)
+        # Logic: (particle, contamination) map to correct limits in e and g
+        elims_choice = {
+            ('e', False) : ELECTRON_ELIMS,
+            ('e', True) : P_CONTAMINATION_ELIMS,
+            ('p', False) : PROTON_ELIMS,
+            ('p', True) : E_CONTAMINATION_ELIMS
+        }
 
-        return gf_cross, {'gfup': gf_upper, 'gflo': gf_lower}, energy_cross, channel_energy_low, channel_energy_high
+        glims_choice = {
+            ('e', False) : ELECTRON_GLIMS,
+            ('e', True) : P_CONTAMINATION_GLIMS,
+            ('p', False) : PROTON_GLIMS,
+            ('p', True) : E_CONTAMINATION_GLIMS
+        }
 
-    return gf_cross, energy_cross, channel_energy_low, channel_energy_high
+        fig, ax = plt.subplots(figsize=FIGSIZE)
+
+        # elims = ELECTRON_ELIMS if particle=='e' and not contamination else PROTON_ELIMS if not contamination else CONTAMINATION_ELIMS
+        ax.set_xlim(elims_choice[(particle,contamination)])
+
+        # glims = ELECTRON_GLIMS if particle=='e' and not contamination else PROTON_GLIMS if not contamination else CONTAMINATION_GLIMS
+        ax.set_ylim(glims_choice[(particle,contamination)])
+        # ax.set_ylim((1e-6, 1e-1))
+
+        title_index = 0 if not sum_channels and not contamination else 1 if sum_channels and not contamination else 2
+        ax.set_title(titles[title_index], fontsize=FONTSIZES["title"])
+
+        # Plotting the curves
+        for response in response_matrix:
+
+            if save_response_matrix:
+                channel_name_list.append(response["name"])
+                incident_energies.append(response["grid"]["midpt"])
+                responses.append(response["resp"])
+
+            # Check here the last channels that we do NOT want to plot if we're plotting cross-channel contamination
+            if contamination and response["name"] in UNDESIRED_CROSS_CHANNELS:
+                continue
+            ax.plot(response["grid"]["midpt"], response["resp"], label=response["name"], lw=2.5)
+
+
+        ax.legend(loc=UPPER_LEFT, bbox_to_anchor=(0.99,1.0), fontsize=FONTSIZES["legend"], frameon=True, fancybox=True)
+
+        set_standard_response_plot_settings(ax=ax)
+
+        if savefig:
+            fig.savefig(fname=f"{CURRENT_DIRECTORY}{os.sep}{subdir}{os.sep}{titles[title_index].lower().replace(' ','_')}.png", facecolor="white", transparent=False, bbox_inches="tight")
+
+        plt.show()
+
+
+    if save_response_matrix:
+
+        np.save(file=f"{CURRENT_DIRECTORY}{os.sep}{subdir}{os.sep}{particle}_incident_energies.npy", arr=incident_energies)
+        if not contamination:
+            np.save(file=f"{CURRENT_DIRECTORY}{os.sep}{subdir}{os.sep}{particle}_channel_names.npy", arr=channel_name_list)
+            np.save(file=f"{CURRENT_DIRECTORY}{os.sep}{subdir}{os.sep}{particle}_channel_responses.npy", arr=responses)
+        else:
+            np.save(file=f"{CURRENT_DIRECTORY}{os.sep}{subdir}{os.sep}{particle}_contamination_channel_names.npy", arr=channel_name_list)
+            np.save(file=f"{CURRENT_DIRECTORY}{os.sep}{subdir}{os.sep}{other_particle_str[0]}_channel_responses_to_{particle}.npy", arr=responses)
+
+        print(f"Succesfully created files 'channel_names.npy', 'incident_energies.npy' and channel_responses.npy' in {CURRENT_DIRECTORY}{os.sep}{subdir}!")
+
+    if save_energy_and_geometry:
+
+        geom_factors_dir = savepath
+
+        if save_type == "csv":
+            import pandas as pd
+
+            if not os.path.isdir(f"{CURRENT_DIRECTORY}{os.sep}{geom_factors_dir}"):
+                os.mkdir(f"{CURRENT_DIRECTORY}{os.sep}{geom_factors_dir}")
+                print(f"Created {geom_factors_dir}")
+
+            df = pd.DataFrame(data=gf_and_eff_en)
+            df.index = ('E', "GF", "GF+", "GF-")
+
+            particle = particle if not contamination and particle=='e' else "pe"
+
+            df.to_csv(f"{CURRENT_DIRECTORY}{os.sep}{savepath}{os.sep}sixsp_side{side}_{particle}_gf_en.csv")
+
+        elif save_type == "npy":
+
+            if not os.path.isdir(f"{CURRENT_DIRECTORY}{os.sep}{geom_factors_dir}"):
+                os.mkdir(f"{CURRENT_DIRECTORY}{os.sep}{geom_factors_dir}")
+                print(f"Created {geom_factors_dir}")
+
+            if not contamination:
+                np.save(file=f"{CURRENT_DIRECTORY}{os.sep}{geom_factors_dir}{os.sep}side{side}_{particle}_gf_en.npy", arr=gf_and_eff_en)
+            else:
+                np.save(file=f"{CURRENT_DIRECTORY}{os.sep}{geom_factors_dir}{os.sep}side{side}_p{particle}_gf_en.npy", arr=gf_and_eff_en)
+        
+        else:
+            raise ValueError(f"The parameter save_type has to be either 'csv' or 'npy', not {save_type}!")
+
+if __name__ == "__main__":
+
+    particle = 'e'
+    contamination = False
+
+    if len(sys.argv) > 1:
+        particle = 'e' if sys.argv[1] == '-e' else 'p'
+
+    # main(particle=particle, side=side, contamination=True,
+    #         sum_channels=False, plot=False, save_response_matrix=False, savefig=False,
+    #         save_energy_and_geometry=True)
+
+    for side in (0,1):
+        print(f"Side {side}:")
+        main(particle=particle, side=side, contamination=contamination,
+            sum_channels=False, plot=False, 
+            save_response_matrix=False, savefig=False,
+            save_energy_and_geometry=True,
+            savepath="soft_spectra_bowties")
