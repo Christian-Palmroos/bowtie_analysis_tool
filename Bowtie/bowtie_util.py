@@ -6,7 +6,7 @@ import sys
 
 from matplotlib import pyplot as plt
 
-import bowtie
+from . import bowtie
 
 #from sixs_plot_util import *
 
@@ -68,6 +68,25 @@ def read_npy_vault(vault_name):
                     "binwd": energy_channel_width }
 
     return particles_shot, particles_response, energy_grid, radiation_area
+
+
+def assemble_response_matrix(response_df) ->list[dict]:
+    """
+    Assembles the response matrix needed by 'calculate_bowtie_gf()' from
+    an input dataframe.
+    """
+    
+    response_matrix = []
+    for col in response_df.columns:
+
+        response_matrix.append({
+            "name": col,
+            "grid": {"midpt" : response_df.index.values,
+                     "nstep" : len(response_df.index)},
+            "resp": response_df[col].values
+        })
+    
+    return response_matrix
 
 
 def calculate_response_matrix(particles_shot, particles_response, energy_grid:dict,

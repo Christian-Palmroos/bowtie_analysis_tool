@@ -21,7 +21,8 @@ from . import plotutil as plu
 
 def plot_multi_geometric(geometric_factors, response_data,
                          emin=1.0, emax=100.0, gmin=1.0E-15, gmax=1.0E10,
-                         save=False, saveidx="0", integral=False, save_path=''):
+                         save=False, saveidx="0", integral=False, save_path='',
+                         channel:str=None):
     """
     Plot differential geometric factor and optionally save the plot.
     :param response_data: channel response data
@@ -38,6 +39,7 @@ def plot_multi_geometric(geometric_factors, response_data,
     :param save: if True, save a Gdiff_saveidx.png file, show the plot otherwise
     :param save_path: Base path for saving the plot
     :type save_path: basestring
+    :channel : {str} optional. Adds channel to the title of the figure if provided.
     """
     energy_grid_plot = response_data['grid']
     plu.setup_latex(rcParams)
@@ -83,6 +85,9 @@ def plot_multi_geometric(geometric_factors, response_data,
     subax.set_xlim(emin, emax)
     ax.set_xlim(emin, emax)
     ax.set_ylim(gmin, gmax)
+
+    if isinstance(channel, str):
+        ax.set_title(f"{channel} response function and bowtie", fontsize=18)
     if integral:
         fname_ = save_path + 'Gint_np_{0:s}.png'.format(saveidx)
     else:
@@ -93,6 +98,7 @@ def plot_multi_geometric(geometric_factors, response_data,
         print(fname_)
     else:
         plt.show(block=True)
+        return fig, (ax, subax)
 
 
 def generate_pwlaw_spectra(energy_grid_dict,
@@ -122,7 +128,7 @@ def generate_exppowlaw_spectra(energy_grid_dict,
                                cutoff_energy=1.0):
     model_spectra = []  # generate exponential cutoff power-law spectra for folding
     if use_integral_bowtie:
-        print("Not implemented!")
+        print("Integral bowtie is not yet implemented!")
         return None
     else:
         for power_law_gamma in np.linspace(gamma_pow_min, gamma_pow_max, num=num_steps, endpoint=True):
@@ -193,7 +199,8 @@ def calculate_bowtie_gf(response_data,
                         sigma=3,
                         plot=False,
                         gfactor_confidence_level=0.9,
-                        return_gf_stddev=False):
+                        return_gf_stddev=False,
+                        channel:str=None):
     """
     Calculates the bowtie geometric factor for a single channel
     :param return_gf_box: True if the margin of the channel geometric factor is requested.
@@ -215,6 +222,7 @@ def calculate_bowtie_gf(response_data,
     :type sigma: float
     :return: (The geometric factor, the effective energy, lower margin for the effective energy, upper margin for the effective energy)
     :rtype: list
+    :channel : {str} optional. Adds channel id to plot if both enabled.
     """
     energy_grid_local = response_data['grid']['midpt']
 
@@ -282,13 +290,15 @@ def calculate_bowtie_gf(response_data,
     energy_cross = energy_grid_local[bowtie_cross_index]
 
     if plot:
-        plot_multi_geometric(geometric_factors=multi_geometric_factors, response_data=response_data,
-                             emin=emin, emax=emax, gmin=1E-5, gmax=10)
+        fig, axes = plot_multi_geometric(geometric_factors=multi_geometric_factors, response_data=response_data,
+                             emin=emin, emax=emax, gmin=1E-5, gmax=10, channel=channel)
 
     if return_gf_stddev:
         gf_upper = np.quantile(multi_geometric_factors_usable[:, bowtie_cross_index], gfactor_confidence_level)
         gf_lower = np.quantile(multi_geometric_factors_usable[:, bowtie_cross_index], 1 - gfactor_confidence_level)
 
-        return gf_cross, {'gfup': gf_upper, 'gflo': gf_lower}, energy_cross, channel_energy_low, channel_energy_high
+        if plot:
+            return gf_cross, {'gfup': gf_upper, 'gflo': gf_lower}, energy_cross, channel_energy_low, channel_energy_high, fig, axes
+        return gf_cross, {'gfup': gf_upper, 'gflo': gf_lower}, energy_cross, channel_energy_low, channel_energy_high 
 
     return gf_cross, energy_cross, channel_energy_low, channel_energy_high
