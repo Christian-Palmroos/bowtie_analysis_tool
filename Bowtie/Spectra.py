@@ -1,7 +1,9 @@
-
+#!/usr/bin/env python3
 """
-This module contains the Spectra class, that is used to run bowtie analysis.
+This file contains the Spectra class that is used to run bowtie analysis.
 """
+__author__ = "Christian Palmroos"
+__credits__ = ["Christian Palmroos", "Philipp Oleynik"]
 
 from . import bowtie_util
 from . import bowtie 
@@ -21,8 +23,10 @@ class Spectra:
 
         self.cutoff_energy = cutoff_energy
 
+
     def __repr__(self) -> str:
         return f"{self.gamma_steps} spectra ranging from gamma={self.gamma_min} to gamma={self.gamma_max}."
+
 
     def set_spectral_indices(self, gamma_min, gamma_max) -> None:
         """

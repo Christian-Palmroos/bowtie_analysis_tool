@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
+"""
+The Bowtie package. This file contains the Bowtie class, which runs bowtie analysis on 
+response function data, given a range of spectra.
+"""
+__author__ = "Christian Palmroos"
+__credits__ = ["Christian Palmroos", "Philipp Oleynik"]
 
 import pandas as pd
 
-# from matplotlib import pyplot as plt
-
 from . import bowtie_util as btutil
 from . import bowtie
-
 from .Spectra import Spectra
+
 
 class Bowtie:
     """
@@ -73,19 +77,26 @@ class Bowtie:
         result_dict = {}
         result_names = ["geometric_factor", "geometric_factor_errors", "effective_energy",\
                         "effective_lower_boundary", "effective_upper_boundary"]
+        
+        # Attach effective lower and upper boundary to class attributes. Let's not return them
+        # in the dictionary to avoid confusion.
+        self.effective_energy_low = bowtie_results[3]
+        self.effective_energy_high = bowtie_results[4]
+
         if plot:
             result_names.append("fig")
             result_names.append("axes")
 
         for i, res in enumerate(bowtie_results):
 
-            # Handle errors here
+            # Handle gf errors here
             if i==1:
                 res["gfup"] -= bowtie_results[0]
                 res["gflo"] -= bowtie_results[0]
                 res["gflo"] = -res["gflo"]
 
-            result_dict[result_names[i]] = res
+            if result_names[i] not in ("effective_lower_boundary", "effective_upper_boundary"):
+                result_dict[result_names[i]] = res
 
         return result_dict
 
@@ -102,7 +113,7 @@ class Bowtie:
 
             new_result = self.bowtie_analysis(channel=channel, spectra=spectra, plot=plot,
                                               geom_factor_confidence=geom_factor_confidence)
-        
+
             all_bowtie_results.append(new_result)
 
         return all_bowtie_results
